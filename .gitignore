@@ -46,3 +46,6 @@ data.tar.gz
 scratchpad/
 *.bz2
 *.pkl
+
+# Git worktrees
+.worktrees/

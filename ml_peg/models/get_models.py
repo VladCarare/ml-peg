@@ -370,13 +370,23 @@ def load_models(
                 )
             case "FAIRChemCalculator":
                 kwargs = cfg.get("kwargs", {})
-                model_name = pop_required_kwarg(name, kwargs, "model_name")
+                # A locally trained checkpoint has no published name, so one or
+                # the other identifies the model. `model_name` stays required
+                # where there is no checkpoint, since a nameless published entry
+                # would otherwise load whatever fairchem defaults to.
+                checkpoint = kwargs.pop("checkpoint", None)
+                model_name = (
+                    kwargs.pop("model_name", None)
+                    if checkpoint
+                    else pop_required_kwarg(name, kwargs, "model_name")
+                )
                 task_name = kwargs.pop("task_name", "omat")
                 overrides = kwargs.pop("overrides", {})
                 loaded_models[name] = FairChemCalc(
                     module=cfg["module"],
                     class_name=cfg["class_name"],
                     model_name=model_name,
+                    checkpoint=checkpoint,
                     task_name=task_name,
                     device=cfg.get("device", "auto"),
                     overrides=overrides,

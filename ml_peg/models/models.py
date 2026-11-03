@@ -8,6 +8,7 @@ import dataclasses
 from functools import wraps
 import importlib
 import inspect
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, get_args
 from warnings import warn
 
@@ -854,7 +855,9 @@ class OrbCalc(SumCalc):
 class FairChemCalc(SumCalc):
     """Dataclass for fairchem (UMA) calculator."""
 
-    model_name: str
+    model_name: str | None = None
+    #: Path to a locally trained checkpoint, in place of a published `model_name`.
+    checkpoint: str | None = None
     task_name: str
     module: str = "fairchem.core"
     class_name: str = "FAIRChemCalculator"
@@ -881,11 +884,31 @@ class FairChemCalc(SumCalc):
         """
         from fairchem.core.units.mlip_unit.api.inference import (
             inference_settings_default,
+            inference_settings_traineval,
         )
 
         fairchem_calculator = import_calculator(self.module, self.class_name)
-        # Checkpoints are loaded from the same module as the calculator.
-        pretrained_mlip = import_calculator(self.module, "pretrained_mlip")
+
+        if self.checkpoint:
+            load_predict_unit = import_calculator(
+                "fairchem.core.units.mlip_unit", "load_predict_unit"
+            )
+            loader, first_argument = load_predict_unit, self.checkpoint
+            # "traineval" rather than the shipped default, which sets both
+            # merge_mole and compile. Each breaks a locally trained checkpoint in
+            # its own way: merge_mole makes one trained with regress_stress=False
+            # -- correct for isolated molecules, and baked in -- raise "One of the
+            # differentiated Tensors does not require grad" on every structure
+            # through ASE, and compile mangles a two-stage gradient such as the
+            # polar head's, inflating forces by about 1.8x while still returning
+            # plausible numbers. Published checkpoints have neither problem, so
+            # this is tied to loading from a path rather than applied throughout.
+            base_settings = inference_settings_traineval()
+        else:
+            # Published checkpoints are loaded from the same module as the calculator.
+            pretrained_mlip = import_calculator(self.module, "pretrained_mlip")
+            loader, first_argument = pretrained_mlip.get_predict_unit, self.model_name
+            base_settings = inference_settings_default()
 
         # fairchem defaults to float32; map the requested precision to the base
         # dtype so precision="high" runs in float64. A configured default_dtype
@@ -894,14 +917,16 @@ class FairChemCalc(SumCalc):
         precision_map = {"low": "float32", "high": "float64"}
         dtype = self.default_dtype or precision_map[precision]
         inference_settings = dataclasses.replace(
-            inference_settings_default(), base_precision_dtype=dtype
+            base_settings, base_precision_dtype=dtype
         )
 
         predictor_kwargs, calc_kwargs = split_kwargs(
             self.kwargs,
-            (pretrained_mlip.get_predict_unit, fairchem_calculator),
+            (loader, fairchem_calculator),
             reserved=(
                 "model_name",
+                "checkpoint",
+                "path",
                 "device",
                 "overrides",
                 "inference_settings",
@@ -912,8 +937,8 @@ class FairChemCalc(SumCalc):
 
         device = Device.resolve_auto() if self.device == Device.AUTO else self.device
 
-        predictor = pretrained_mlip.get_predict_unit(
-            self.model_name,
+        predictor = loader(
+            first_argument,
             device=device,
             overrides=self.overrides,
             inference_settings=inference_settings,
@@ -931,6 +956,11 @@ class FairChemCalc(SumCalc):
         bool
             Whether the calculator can be loaded.
         """
+        if self.checkpoint:
+            # A local checkpoint is not in the published registry, so the only
+            # question that can be asked of it is whether the file is there.
+            return Path(self.checkpoint).is_file()
+
         try:
             pretrained_mlip = import_calculator(self.module, "pretrained_mlip")
 
